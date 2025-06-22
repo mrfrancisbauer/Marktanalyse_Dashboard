@@ -23,6 +23,11 @@ resolution_note = {
 }
 st.sidebar.markdown(f"**Ausgewähltes Intervall:** {resolution_note.get(interval, '')}")
 
+# Sidebar: Anzeigeoptionen für Indikatoren und Signale
+with st.sidebar.expander("🔍 Anzeigen"):
+    show_indicators = st.checkbox("Indikatoren anzeigen", value=True)
+    show_signals = st.checkbox("Buy/Test Signale anzeigen", value=True)
+
 # Dynamische Standardwerte für RSI/MA je nach Intervall
 if interval == "1h":
     default_rsi_buy = 35
@@ -110,6 +115,8 @@ def load_data(ticker, start, end, interval):
     df['EMA5'] = df['Close'].ewm(span=5, adjust=False).mean()
     df['EMA14'] = df['Close'].ewm(span=14, adjust=False).mean()
     df['EMA69'] = df['Close'].ewm(span=69, adjust=False).mean()
+    df['EMA_5W'] = df['Close'].ewm(span=5 * 5, adjust=False).mean()  # 5 Wochen EMA auf Tagesbasis
+    df['EMA_5Y'] = df['Close'].ewm(span=5 * 252, adjust=False).mean()  # 5 Jahres EMA auf Tagesbasis
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA100'] = df['Close'].rolling(window=100).mean()
 
@@ -248,20 +255,26 @@ if show_static:
 
 # 🟢 Marktampel
 st.subheader("🚦Marktampel – Überblick")
-last_rsi = round(data['RSI'].dropna().iloc[-1], 1)
+if 'RSI' in data.columns and not data['RSI'].dropna().empty:
+    last_rsi = round(data['RSI'].dropna().iloc[-1], 1)
+else:
+    last_rsi = None
 ma_slope = data['MA50'].dropna().iloc[-1] - data['MA50'].dropna().iloc[-5] if len(data['MA50'].dropna()) >= 5 else 0
 
 # 5-stufige Ampellogik mit klarer Differenzierung
-if last_rsi > 65 and ma_slope > 0.5:
-    ampel = "🟢 Sehr bullisch"
-elif last_rsi > 55 and ma_slope > 0:
-    ampel = "🟢 Bullisch"
-elif last_rsi > 45:
-    ampel = "🟡 Neutral"
-elif last_rsi > 35 or ma_slope < 0:
-    ampel = "🟠 Schwach"
+if last_rsi is not None:
+    if last_rsi > 65 and ma_slope > 0.5:
+        ampel = "🟢 Sehr bullisch"
+    elif last_rsi > 55 and ma_slope > 0:
+        ampel = "🟢 Bullisch"
+    elif last_rsi > 45:
+        ampel = "🟡 Neutral"
+    elif last_rsi > 35 or ma_slope < 0:
+        ampel = "🟠 Schwach"
+    else:
+        ampel = "🔴 Sehr schwach"
 else:
-    ampel = "🔴 Sehr schwach"
+    ampel = "⚫ Kein RSI verfügbar"
 
 # Metriken anzeigen
 st.metric(label="RSI (Letzte Woche)", value=f"{last_rsi}")
@@ -302,9 +315,12 @@ st.write(f"Datapoints: {len(data)}")  # Zeigt Anzahl der Zeilen im DataFrame
 
 
 st.subheader("📊 Interaktiver Chart")
+# Prepare buy_signals and test_signals for plotting
 plot_df = data.copy()
 plot_df['Buy Signal'] = np.where(plot_df.index.isin(buy_zone.index), plot_df['Close_Series'], np.nan)
 plot_df['Test Signal'] = np.where(plot_df.index.isin(test_zone.index), plot_df['Close_Series'], np.nan)
+buy_signals = plot_df['Buy Signal'].dropna()
+test_signals = plot_df['Test Signal'].dropna()
 
 fig3 = go.Figure()
 fig3.update_layout(height=1200)
@@ -313,18 +329,39 @@ mid_price = plot_df['Close'].median()
 spread = mid_price * (y_range_pct / 100)
 y_min = mid_price - spread
 y_max = mid_price + spread
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA50'], name='MA50')) #, line=dict(dash='dot')
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA200'], name='MA200', line=dict(dash='dot', color='orange')))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA5'], name='EMA5', line=dict(dash='dot', color='blueviolet')))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA14'], name='EMA14', line=dict(dash='dot', color='green')))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA69'], name='EMA69', line=dict(dash='dot', color='magenta')))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA20'], name='MA20', line=dict(dash='dot', color='red')))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA100'], name='MA100', line=dict(dash='dot', color='brown')))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_upper'], name='BB Upper', line=dict(dash='dot', color='purple'), opacity=0.6))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_lower'], name='BB Lower', line=dict(dash='dot', color='purple'), opacity=0.6))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_mid'], name='BB Mid', line=dict(dash='dot', color='violet'), opacity=0.4))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Buy Signal'], mode='markers', name='Buy Signal', marker=dict(color='green', size=10)))
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['Test Signal'], mode='markers', name='Test Signal', marker=dict(color='red', size=10)))
+
+# Bedingte Anzeige der Indikatoren
+if show_indicators:
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA50'], name='MA50', line=dict(dash='dot', color='orange')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA200'], name='MA200', line=dict(dash='dot', color='orange')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA5'], name='EMA5', line=dict(dash='dot', color='blueviolet')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA14'], name='EMA14', line=dict(dash='dot', color='green')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA69'], name='EMA69', line=dict(dash='dot', color='magenta')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_5W'], name='Weekly EMA(5)', line=dict(dash='dot', color='gray')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_5Y'], name='Yearly EMA(5)', line=dict(dash='dash', color='gray')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA20'], name='MA20', line=dict(dash='dot', color='red')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA100'], name='MA100', line=dict(dash='dot', color='brown')))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_upper'], name='BB Upper', line=dict(dash='dot', color='purple'), opacity=0.6))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_lower'], name='BB Lower', line=dict(dash='dot', color='purple'), opacity=0.6))
+    fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_mid'], name='BB Mid', line=dict(dash='dot', color='violet'), opacity=0.4))
+
+# Bedingte Anzeige der Buy/Test Signale
+if show_signals:
+    if not buy_signals.empty:
+        fig3.add_trace(go.Scatter(
+            x=buy_signals.index, y=buy_signals, mode='markers', name='Buy Signal',
+            marker=dict(symbol='circle', size=10, color='green')))
+    if not test_signals.empty:
+        fig3.add_trace(go.Scatter(
+            x=test_signals.index, y=test_signals, mode='markers', name='Test Signal',
+            marker=dict(symbol='x', size=10, color='red')))
+# Sidebar-Expander für EMA(5)-Kontext
+with st.sidebar.expander("EMA(5) – Kontext"):
+    st.markdown("""
+    **Weekly EMA(5):** Zeigt kurzfristige Trendrichtung im Wochenkontext.  
+    **Yearly EMA(5):** Extrem langfristiger Trend, Orientierung bei Makrotrends.  
+    Beide Linien helfen bei der Einordnung, ob Buy-/Testzonen im Trend liegen oder konträr sind.
+    """)
 # Ensure OHLC columns in plot_df for Candlestick
 plot_df['Open'] = data['Open']
 plot_df['High'] = data['High']
@@ -455,6 +492,40 @@ with st.expander("Legende"):
 **Signale**
 - **Grüne Punkte**: Buy-Signal (Kombination aus RSI/MA)
 - **Rote Punkte**: Test-Signal (Kombination aus RSI/MA)
+    """)
+
+with st.expander("🧠 Erklärung: Buy- und Test-Zonen"):
+    st.markdown("""
+    Die **Buy- und Test-Zonen** dienen der Identifikation von markanten Preisbereichen, an denen der Markt typischerweise reagiert. Diese Zonen können sowohl für Einstiege als auch für Risikomanagement genutzt werden.
+
+    ---
+    ### ✅ **Buy-Zonen**
+    - **Definition:** Bereich mit erhöhtem Kaufinteresse. Typischerweise frühere Tiefs, an denen es zu Umkehrformationen kam.
+    - **Bedingungen:** 
+      - RSI unter eingestellter Schwelle (z. B. unter 40)
+      - Kurs liegt nahe unter dem gleitenden Durchschnitt MA200
+    - **Signal:** Grüner Punkt im Chart
+    - **Beispiel:** 
+        - RSI = 35, Kurs bei 4.200 Punkte (MA200 = 4.250) → Buy-Signal wird aktiviert
+
+    ---
+    ### 🧪 **Test-Zonen**
+    - **Definition:** Preisbereiche, die als Widerstand fungieren oder „abgeklopft“ werden, bevor der Markt entscheidet.
+    - **Bedingungen:** 
+      - RSI über eingestellter Schwelle (z. B. über 65)
+      - Kurs über MA50 + 5 %
+    - **Signal:** Roter Punkt im Chart
+    - **Beispiel:** 
+        - RSI = 72, Kurs bei 4.600 Punkte (MA50 = 4.300) → Test-Zone aktiviert
+
+    ---
+    ### 🧠 **Hintergrund zur automatischen Erkennung**
+    Zusätzlich zu den signalbasierten Zonen identifiziert der Algorithmus **automatisch relevante Kurscluster**, z. B. lokale Hochs oder Tiefs, die mehrfach angelaufen wurden. Diese Zonen basieren auf der sog. **Prominenz** des Kursverlaufs (analog zu `find_peaks`).
+
+    Dadurch entstehen:
+    - **Buy-Zonen (grüne Flächen):** Mehrfache Unterstützungen
+    - **Test-Zonen (orange Flächen):** Widerstandszonen oder Pivot-Level
+
     """)
 
 
