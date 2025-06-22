@@ -82,7 +82,17 @@ price_bins = st.sidebar.slider("📊 Volumenprofil-Bins", 10, 100, 50)
 y_range_pct = st.sidebar.slider("📐 Y-Achse Zoom (%)", 1, 50, 15, help="Definiert den sichtbaren Bereich um den Medianpreis ± x %")
 
 # Zonen-Prominenz Slider für automatische Zonenfindung
+
 zone_prominence = st.sidebar.slider("Prominenz für Zonenfindung", 10, 1000, 300, step=50)
+with st.sidebar.expander("ℹ️ Erklärung zur Zonenprominenz"):
+    st.markdown("""
+    Die **Prominenz** bestimmt, wie **ausgeprägt** ein lokales Hoch oder Tief sein muss, um als Buy-/Test-Zone erkannt zu werden.
+
+    - **Niedrige Prominenz** (z. B. 100): erkennt viele kleinere Zonen – ideal für **Intraday-Setups**
+    - **Hohe Prominenz** (z. B. 600–1000): erkennt nur markante, längerfristige Zonen – geeignet für **Swing- oder Positionstrading**
+
+    **Technischer Hintergrund:** Eine Spitze zählt nur dann als relevant, wenn sie sich um mindestens die gewählte Prominenz **von benachbarten Kurswerten abhebt** (basierend auf `scipy.signal.find_peaks`).
+    """)
 
 # Statischer Chart
 show_static = st.sidebar.checkbox("📷 Statischen Chart anzeigen", value=False)
@@ -234,6 +244,8 @@ if show_static:
     fig.autofmt_xdate()
     st.pyplot(fig)
 
+
+
 # 🟢 Marktampel
 st.subheader("🚦Marktampel – Überblick")
 last_rsi = round(data['RSI'].dropna().iloc[-1], 1)
@@ -289,7 +301,6 @@ st.write(data[['Open', 'High', 'Low', 'Close']].dropna().tail())  # Zeigt letzte
 st.write(f"Datapoints: {len(data)}")  # Zeigt Anzahl der Zeilen im DataFrame
 
 
-# 📊 Interaktives Plotly-Chart
 st.subheader("📊 Interaktiver Chart")
 plot_df = data.copy()
 plot_df['Buy Signal'] = np.where(plot_df.index.isin(buy_zone.index), plot_df['Close_Series'], np.nan)
@@ -302,7 +313,7 @@ mid_price = plot_df['Close'].median()
 spread = mid_price * (y_range_pct / 100)
 y_min = mid_price - spread
 y_max = mid_price + spread
-fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA50'], name='MA50', line=dict(dash='dot')))
+fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA50'], name='MA50')) #, line=dict(dash='dot')
 fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA200'], name='MA200', line=dict(dash='dot', color='orange')))
 fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA5'], name='EMA5', line=dict(dash='dot', color='blueviolet')))
 fig3.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA14'], name='EMA14', line=dict(dash='dot', color='green')))
@@ -370,7 +381,6 @@ for lvl in buy_levels:
 
 
 # Test-Zonen als Rechtecke (±1.5% Bandbreite)
-# Test-Zonen als Rechtecke (±1.5% Bandbreite)
 if test_levels:
     test_min = min(test_levels)
     test_max = max(test_levels)
@@ -382,7 +392,6 @@ if test_levels:
                        fillcolor='rgba(255, 102, 0, 0.15)',
                        line=dict(color='orange', width=1),
                        layer='below')
-
 
 # Test-Zonen Textbeschriftung
 for lvl in test_levels:
