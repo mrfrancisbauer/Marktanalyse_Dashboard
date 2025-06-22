@@ -84,6 +84,9 @@ y_range_pct = st.sidebar.slider("📐 Y-Achse Zoom (%)", 1, 50, 15, help="Defini
 # Zonen-Prominenz Slider für automatische Zonenfindung
 zone_prominence = st.sidebar.slider("Prominenz für Zonenfindung", 10, 1000, 300, step=50)
 
+# Statischer Chart
+show_static = st.sidebar.checkbox("📷 Statischen Chart anzeigen", value=False)
+
 @st.cache_data
 def load_data(ticker, start, end, interval):
     df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False)
@@ -217,29 +220,56 @@ for count, edge in zip(hist_vals, bin_edges[:-1]):
     ax.barh(y=edge, width=(count / max_volume) * close_series.max() * 0.1, height=(bin_edges[1] - bin_edges[0]), alpha=0.2, color='gray')
 
 # Layout
-ax.set_xlim([data.index.min(), data.index.max()])
-ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-ax.set_title(f"{ticker} – Buy-/Test-Zonen mit Volumenprofil & Fibonacci", fontsize=14)
-ax.set_xlabel("Datum")
-ax.set_ylabel("Kurs")
-ax.grid(True)
-ax.legend()
-fig.autofmt_xdate()
-st.pyplot(fig)
+if show_static:
+    st.subheader("📊 Statischer Chart (für Export oder Snapshot)")
+    st.pyplot(fig)
+    ax.set_xlim([data.index.min(), data.index.max()])
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax.set_title(f"{ticker} – Buy-/Test-Zonen mit Volumenprofil & Fibonacci", fontsize=14)
+    ax.set_xlabel("Datum")
+    ax.set_ylabel("Kurs")
+    ax.grid(True)
+    ax.legend()
+    fig.autofmt_xdate()
+    st.pyplot(fig)
 
 # 🟢 Marktampel
-st.subheader("🟢 Marktampel – Überblick")
+st.subheader("🚦Marktampel – Überblick")
 last_rsi = round(data['RSI'].dropna().iloc[-1], 1)
 ma_slope = data['MA50'].dropna().iloc[-1] - data['MA50'].dropna().iloc[-5] if len(data['MA50'].dropna()) >= 5 else 0
-ampel = "🔴 Schwach"
-if last_rsi > 60 and ma_slope > 0:
+
+# 5-stufige Ampellogik mit klarer Differenzierung
+if last_rsi > 65 and ma_slope > 0.5:
+    ampel = "🟢 Sehr bullisch"
+elif last_rsi > 55 and ma_slope > 0:
     ampel = "🟢 Bullisch"
-elif last_rsi > 45 and ma_slope > 0:
-    ampel = "🟡 Neutral ↗"
+elif last_rsi > 45:
+    ampel = "🟡 Neutral"
+elif last_rsi > 35 or ma_slope < 0:
+    ampel = "🟠 Schwach"
+else:
+    ampel = "🔴 Sehr schwach"
+
+# Metriken anzeigen
 st.metric(label="RSI (Letzte Woche)", value=f"{last_rsi}")
 st.metric(label="MA50 Trend (5 Wochen)", value=f"{ma_slope:.1f}")
+
+
+# Ampelbeschreibung
 st.markdown(f"**Marktampel:** {ampel}")
+with st.expander("ℹ️ Erläuterung zur Marktampel"):
+    st.markdown("""
+    Die Marktampel bewertet die aktuelle Marktlage basierend auf dem RSI (Relative Strength Index) sowie dem Trendverlauf des MA50:
+
+    - 🟢 **Sehr bullisch**: RSI &gt; 65 und MA50-Trend deutlich steigend
+    - 🟢 **Bullisch**: RSI &gt; 55 und MA50-Trend positiv
+    - 🟡 **Neutral**: RSI zwischen 45 und 55
+    - 🟠 **Schwach**: RSI unter 45 oder fallender MA50-Trend
+    - 🔴 **Sehr schwach**: RSI unter 35 und klar negativer MA50-Trend
+
+    Diese Einschätzung hilft bei der groben Einordnung des Marktumfelds, ersetzt aber keine eigene Analyse.
+    """)
 
 # 📥 CSV-Export
 export_df = pd.DataFrame({
@@ -397,6 +427,27 @@ fig3.update_layout(
     yaxis=dict(gridcolor='#444444', autorange=True)
 )
 st.plotly_chart(fig3, use_container_width=True)
+# Legende als Expander statt im Chart
+with st.expander("Legende"):
+    st.markdown("""
+**Linien & Farben**
+- **MA50**: dunkelblau (Durchschnitt der letzten 50 Perioden)
+- **EMA20**: violett (Exponentieller Durchschnitt, 20 Perioden)
+- **Close**: schwarz/grau (Schlusskurs)
+- **Bollinger Bands**: mediumpurple
+- **Candlesticks**:  
+    - **Dunkelgrün**: Bullish (Schlusskurs > Eröffnung)  
+    - **Rot**: Bearish (Schlusskurs < Eröffnung)
+
+**Zonen**
+- **Buy-Zonen**: grünliche Fläche ('rgba(50,200,100,0.2)') – Bereich mit erhöhtem Kaufinteresse
+- **Test-Zonen**: orange-braune Fläche ('rgba(200,100,50,0.2)') – Bereich mit Widerstand/Test
+
+**Signale**
+- **Grüne Punkte**: Buy-Signal (Kombination aus RSI/MA)
+- **Rote Punkte**: Test-Signal (Kombination aus RSI/MA)
+    """)
+
 
 # 📊 Sektorrotation
 st.header("📊 Sektorrotation")
