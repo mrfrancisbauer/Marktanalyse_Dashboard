@@ -1,3 +1,35 @@
+import matplotlib.pyplot as plt
+from ta.momentum import RSIIndicator
+
+# --- Inserted function: plot_spx_monthly_ma_chart() ---
+def plot_spx_monthly_ma_chart():
+    import yfinance as yf
+    import pandas as pd
+    import matplotlib.dates as mdates
+
+    # SPX laden (Monthly)
+    df = yf.download("^GSPC", start="2015-01-01", interval="1mo")
+    df.dropna(inplace=True)
+    df['EMA5'] = df['Close'].ewm(span=5, adjust=False).mean()
+    df['EMA14'] = df['Close'].ewm(span=14, adjust=False).mean()
+    df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(df.index, df['Close'], label='SPX Monthly Close', color='black')
+    ax.plot(df.index, df['EMA5'], label='EMA5', linestyle='--', alpha=0.7)
+    ax.plot(df.index, df['EMA14'], label='EMA14', linestyle='--', alpha=0.7)
+    ax.plot(df.index, df['EMA20'], label='EMA20', linestyle='--', alpha=0.7)
+    ax.plot(df.index, df['MA20'], label='MA20', linestyle=':', alpha=0.7)
+    ax.plot(df.index, df['MA50'], label='MA50', linestyle=':', alpha=0.7)
+    ax.set_title("SPX Monthly Close + MAs")
+    ax.set_ylabel("Index Level")
+    ax.grid(True)
+    ax.legend()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -8,13 +40,14 @@ from ta.volatility import BollingerBands
 import matplotlib.dates as mdates
 import plotly.graph_objects as go
 from scipy.signal import find_peaks
+import datetime
 
 st.set_page_config(layout="wide")
 st.title("📊 Marktanalyse-Dashboard: Buy-/Test-Zonen & Sektorrotation")
 
 ticker = None  # move definition down
 st.sidebar.title("🔧 Einstellungen")
-interval = st.sidebar.selectbox("⏱️ Datenintervall", options=["1d", "1wk", "1h"], index=0)
+interval = st.sidebar.selectbox("⏱️ Datenintervall", options=["1wk", "1d", "1h"], index=0)
 # Intervall-Notiz unterhalb des Intervall-Selectbox
 resolution_note = {
     "1h": "⏰ Intraday (Scalping/Daytrading)",
@@ -22,6 +55,19 @@ resolution_note = {
     "1wk": "📆 Weekly (Makro-Trends)"
 }
 st.sidebar.markdown(f"**Ausgewähltes Intervall:** {resolution_note.get(interval, '')}")
+
+# Automatische Cluster-Toleranz je nach Intervall (neue Logik)
+selected_interval = interval
+if selected_interval == "1h":
+    cluster_threshold = 0.005  # 0.5%
+elif selected_interval == "1d":
+    cluster_threshold = 0.01  # 1%
+elif selected_interval == "1wk":
+    cluster_threshold = 0.015  # 1.5%
+elif selected_interval == "1mo":
+    cluster_threshold = 0.02  # 2%
+else:
+    cluster_threshold = 0.01  # Standardwert
 
 # Sidebar: Anzeigeoptionen für Indikatoren und Signale
 with st.sidebar.expander("🔍 Anzeigen"):
@@ -53,13 +99,16 @@ with st.sidebar.expander("📘 Tickerliste (Beispiele)"):
     - ^NDX → Nasdaq 100  
     - ^DJI → Dow Jones  
     - ^RUT → Russell 2000  
+    - ^GDAXI → Dax 40
 
     **Einzelaktien**
     - AAPL → Apple  
     - MSFT → Microsoft  
     - NVDA → Nvidia  
     - TSLA → Tesla  
-    - AMZN → Amazon  
+    - AMZN → Amazon
+    - AMD → AMD
+    - MO.PA → LVMH
 
     **ETFs**
     - SPY → S&P 500 ETF  
@@ -67,7 +116,7 @@ with st.sidebar.expander("📘 Tickerliste (Beispiele)"):
     - IWM → Russell 2000 ETF  
     - DIA → Dow Jones ETF  
     """)
-start_date = st.sidebar.date_input("📅 Startdatum", value=pd.to_datetime("2025-01-01"))
+start_date = st.sidebar.date_input("📅 Startdatum", value=pd.to_datetime("2023-01-01"))
 end_date = st.sidebar.date_input("📅 Enddatum", value=pd.to_datetime("today"))
 rsi_buy_threshold = st.sidebar.slider(
     "RSI Buy-Zone Schwelle", 10, 50, default_rsi_buy,
@@ -87,7 +136,6 @@ price_bins = st.sidebar.slider("📊 Volumenprofil-Bins", 10, 100, 50)
 y_range_pct = st.sidebar.slider("📐 Y-Achse Zoom (%)", 1, 50, 15, help="Definiert den sichtbaren Bereich um den Medianpreis ± x %")
 
 # Zonen-Prominenz Slider für automatische Zonenfindung
-
 zone_prominence = st.sidebar.slider("Prominenz für Zonenfindung", 10, 1000, 300, step=50)
 with st.sidebar.expander("ℹ️ Erklärung zur Zonenprominenz"):
     st.markdown("""
@@ -99,10 +147,26 @@ with st.sidebar.expander("ℹ️ Erklärung zur Zonenprominenz"):
     **Technischer Hintergrund:** Eine Spitze zählt nur dann als relevant, wenn sie sich um mindestens die gewählte Prominenz **von benachbarten Kurswerten abhebt** (basierend auf `scipy.signal.find_peaks`).
     """)
 
+# Clustering-Schwelle Slider
+threshold_pct = st.sidebar.slider("📎 Clustering-Schwelle (%)", 0, 10, 3, step=1)
+with st.sidebar.expander("ℹ️ Erklärung zur Clustering-Schwelle"):
+    st.markdown("""
+    Die Clustering-Schwelle bestimmt, ob **nahe beieinanderliegende Kursniveaus** (z. B. zwei Tiefs bei 4100 und 4120 Punkten) **zu einer gemeinsamen Zone zusammengefasst** werden.
+
+    ---
+    **Empfohlene Einstellungen:**
+    - **Intraday-Setups (1h):** 1–2 % – genauere Zonen
+    - **Swingtrading (1d):** 2–4 % – robuste Zonen mit etwas Toleranz
+    - **Makro (1w):** 4–6 % – breite Zonen mit starker Signifikanz
+
+    Die Schwelle wirkt **nachträglich** auf automatisch erkannte Hoch- und Tiefpunkte.
+    """)
+
+
 # Statischer Chart
 show_static = st.sidebar.checkbox("📷 Statischen Chart anzeigen", value=False)
 
-@st.cache_data
+@st.cache_data(ttl=60)  # cache expires after 10 minutes
 def load_data(ticker, start, end, interval):
     df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False)
     df.dropna(inplace=True)
@@ -126,26 +190,45 @@ def load_data(ticker, start, end, interval):
     df['BB_mid'] = bb.bollinger_mavg()
     return df
 
+if st.button("🔄 Daten neu laden"):
+    st.cache_data.clear()
 data = load_data(ticker, start_date, end_date, interval)
 data.index = pd.to_datetime(data.index)
 close_series = data['Close_Series']
 
 
-# Automatische Zonenidentifikation (anhand Kursstruktur)
 def identify_zone_ranges(series, prominence=0.5):
-
     # Buy-Zonen: lokale Tiefs
     lows_idx, _ = find_peaks(-series, prominence=prominence)
     low_levels = sorted(set(round(series[i], -1) for i in lows_idx))  # gerundet für Clustering
-
     # Test-Zonen: lokale Hochs
     highs_idx, _ = find_peaks(series, prominence=prominence)
     high_levels = sorted(set(round(series[i], -1) for i in highs_idx))  # gerundet für Clustering
-
     return low_levels, high_levels
 
+# --- Zonen-Clustering Funktion (Cluster-Zonen zusammenfassen) ---
+def cluster_zones(levels, threshold_pct):
+    """Fasst nahe beieinanderliegende Zonen gemäß threshold_pct (in %) zusammen."""
+    if not levels:
+        return []
+    levels_sorted = sorted(levels)
+    clusters = []
+    current_cluster = [levels_sorted[0]]
+    for lvl in levels_sorted[1:]:
+        if abs(lvl - current_cluster[-1]) / current_cluster[-1] * 100 <= threshold_pct:
+            current_cluster.append(lvl)
+        else:
+            # Cluster-Mittelwert
+            clusters.append(round(np.mean(current_cluster), 2))
+            current_cluster = [lvl]
+    clusters.append(round(np.mean(current_cluster), 2))
+    return clusters
+
 # Zonenfindung mit einstellbarer Prominenz
-buy_levels, test_levels = identify_zone_ranges(close_series, prominence=zone_prominence)
+raw_buy_levels, raw_test_levels = identify_zone_ranges(close_series, prominence=zone_prominence)
+# Clustering der gefundenen Levels mit automatisch gewählter cluster_threshold
+buy_levels = cluster_zones(raw_buy_levels, cluster_threshold * 100)
+test_levels = cluster_zones(raw_test_levels, cluster_threshold * 100)
 
 # Buy-/Test-Zonen als DataFrames zur Visualisierung
 buy_zone_df = pd.DataFrame({'Level': buy_levels})
@@ -192,6 +275,63 @@ ax.plot(data['BB_mid'], label='BB Mid', linestyle='--', color='purple', alpha=0.
 ax.scatter(buy_zone.index, close_series.loc[buy_zone.index], label='Buy Zone (Signal)', marker='o', color='green', s=80)
 ax.scatter(test_zone.index, close_series.loc[test_zone.index], label='Test Zone (Signal)', marker='x', color='red', s=80)
 
+
+# --- Confluent Zones (Mehrfach-Konfluenz-Zonen) ---
+def find_confluent_zones(df, prominence_threshold=300, volume_bins=50):
+    zones = []
+    price = df['Close']
+    volume = df['Volume']
+    high = df['High']
+    low = df['Low']
+
+    # Rolling highs/lows (swing levels)
+    rolling_highs = price.rolling(window=10).max()
+    rolling_lows = price.rolling(window=10).min()
+
+    for i in range(10, len(df)):
+        score = 0
+        level = price.iloc[i]
+
+        # Criteria 1: price reacted before (support/resistance)
+        if i < len(rolling_highs) and i < len(rolling_lows):
+            if (abs(level - rolling_highs.iloc[i]) / level).item() < 0.005 or (abs(level - rolling_lows.iloc[i]) / level).item() < 0.005:
+                score += 1
+
+        # Criteria 2: high volume at this price level
+        volume_window = volume[i-5:i+5].mean()
+        if volume.iloc[i].item() > volume_window.mean() * 1.5:
+            score += 1
+
+        # Criteria 3: FVG detection (gap in 3-candle structure)
+        if i >= 2:
+            if (low.iloc[i - 2].item() > high.iloc[i].item()):
+                score += 1
+            try:
+                high_val = high.iloc[i - 2]
+                low_val = low.iloc[i]
+                try:
+                    if (
+                        pd.notna(high_val).item()
+                        and pd.notna(low_val).item()
+                        and high_val.item() < low_val.item()
+                    ):
+                        score += 1
+                except Exception:
+                    pass
+            except (IndexError, KeyError):
+                continue  # überspringt ungültige Indizes
+
+        # Criteria 4: price cluster via KDE peak (approximated)
+        bin_index = int((level - df['Low'].min()) / (df['High'].max() - df['Low'].min()) * volume_bins)
+        if bin_index >= 0 and bin_index < volume_bins:
+            score += 1
+
+        # Add zone if score >= 1
+        if score >= 1:
+            zones.append({'level': level, 'score': score})
+
+    return zones
+
 # Buy-/Test-Zonen als Flächen (je 1 Rechteck pro Zone mit 1.5% Bandbreite)
 valid_ma200 = data['MA200'].dropna()
 if not valid_ma200.empty:
@@ -226,6 +366,25 @@ if test_levels:
     test_upper_auto = test_max * (1 + 0.015)
     ax.axhspan(test_lower_auto, test_upper_auto, color='#ff6600', alpha=0.1, label='Test-Zone automatisch')
 
+# --- Einzeichnen der neuen Confluent Zones ---
+confluent_zones = find_confluent_zones(data, prominence_threshold=zone_prominence, volume_bins=price_bins)
+for zone in confluent_zones:
+    color = 'gray'
+    if zone['score'] >= 4:
+        color = 'green'
+    elif zone['score'] >= 2:
+        color = 'orange'
+    ax.axhline(y=zone['level'].item() if isinstance(zone['level'], pd.Series) else zone['level'],
+               color=color, linestyle='--', linewidth=1, alpha=0.8)
+
+    # Legende für Confluent Zones ergänzen
+from matplotlib.lines import Line2D
+custom_lines = [
+    Line2D([0], [0], color='green', lw=2, linestyle='--', label='High Confluence'),
+    Line2D([0], [0], color='orange', lw=2, linestyle='--', label='Medium Confluence'),
+    Line2D([0], [0], color='gray', lw=2, linestyle='--', label='Low Confluence'),
+]
+
 # Fibonacci farbig in grau (#cccccc), Label oben links, kleinere Schrift
 for lvl, val in fib.items():
     ax.axhline(val, linestyle='--', alpha=0.7, label=f'Fib {lvl} → {val:.0f}', color='#cccccc')
@@ -247,19 +406,118 @@ if show_static:
     ax.set_xlabel("Datum")
     ax.set_ylabel("Kurs")
     ax.grid(True)
-    ax.legend()
+    # Legende um Confluence ergänzen
+    handles, labels = ax.get_legend_handles_labels()
+    handles += custom_lines
+    labels += ['High Confluence', 'Medium Confluence', 'Low Confluence']
+    ax.legend(handles, labels)
     fig.autofmt_xdate()
     st.pyplot(fig)
 
 
 
+# --- Zusätzliche Makro-Charts ---
+
+# JNK vs SPX Chart mit RSI
+def plot_jnk_spx_chart():
+    import matplotlib.pyplot as plt
+    import yfinance as yf
+    import pandas as pd
+    from ta.momentum import RSIIndicator
+    import streamlit as st
+
+    # Daten abrufen
+    jnk = yf.download("JNK", start="2023-06-01", end=pd.to_datetime("today"), interval="1d")
+    spx = yf.download("^GSPC", start="2023-06-01", end=pd.to_datetime("today"), interval="1d")
+
+    # RSI berechnen
+    jnk['RSI'] = RSIIndicator(close=jnk['Close'].squeeze(), window=14).rsi()
+
+    # Plot
+    fig, axs = plt.subplots(3, 1, figsize=(14, 8), gridspec_kw={'height_ratios': [1, 2.5, 1]}, sharex=True)
+
+    # RSI
+    axs[0].plot(jnk.index, jnk['RSI'], color='red', label='RSI (14)')
+    axs[0].axhline(70, color='gray', linestyle='--', linewidth=1)
+    axs[0].axhline(30, color='gray', linestyle='--', linewidth=1)
+    axs[0].set_ylabel('RSI')
+    axs[0].legend(loc='upper left')
+
+    # Candlestick (vereinfacht als Linienchart)
+    axs[1].plot(jnk.index, jnk['Close'], color='green', label='JNK Close')
+    axs[1].set_ylabel('JNK')
+    axs[1].legend(loc='upper left')
+
+    # SPX
+    axs[2].plot(spx.index, spx['Close'], color='cyan', label='SPX Close')
+    axs[2].set_ylabel('SPX')
+    axs[2].legend(loc='upper left')
+
+    plt.tight_layout()
+    st.pyplot(fig)
+
+def plot_hyg_chart():
+    import yfinance as yf
+    import pandas as pd
+    import streamlit as st
+    from ta.momentum import RSIIndicator
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    # Zeitraum festlegen
+    end = pd.Timestamp.today()
+    start = end - pd.DateOffset(years=2)
+
+    # Daten laden
+    hyg = yf.download("HYG", start=start, end=end)
+    spx = yf.download("^GSPC", start=start, end=end)
+
+    # RSI für HYG berechnen
+    rsi = RSIIndicator(close=hyg["Close"].squeeze()).rsi()
+    hyg["RSI"] = rsi
+
+    # Plot erstellen
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+
+    # Preisplot: HYG (linke Achse), SPX (rechte Achse)
+    ax1.plot(hyg.index, hyg["Close"], label="HYG", color="green")
+    ax1.set_ylabel("HYG", color="green")
+    ax1.tick_params(axis="y", labelcolor="green")
+
+    ax1b = ax1.twinx()
+    ax1b.plot(spx.index, spx["Close"], label="SPX", color="blue", alpha=0.6)
+    ax1b.set_ylabel("SPX", color="blue")
+    ax1b.tick_params(axis="y", labelcolor="blue")
+
+    ax1.set_title("HYG vs SPX (2 Jahre)")
+    ax1.grid(True)
+
+    # RSI-Plot
+    ax2.plot(hyg.index, hyg["RSI"], label="RSI (HYG)", color="red")
+    ax2.axhline(70, color="gray", linestyle="--", linewidth=1)
+    ax2.axhline(30, color="gray", linestyle="--", linewidth=1)
+    ax2.set_ylabel("RSI")
+    ax2.set_title("HYG RSI")
+    ax2.grid(True)
+
+    fig.tight_layout()
+    st.pyplot(fig)
+
+
+
+
 # 🟢 Marktampel
 st.subheader("🚦Marktampel – Überblick")
-if 'RSI' in data.columns and not data['RSI'].dropna().empty:
+# Sicheres Auslesen des letzten RSI-Werts
+if not data.empty and 'RSI' in data.columns and not data['RSI'].dropna().empty:
     last_rsi = round(data['RSI'].dropna().iloc[-1], 1)
 else:
     last_rsi = None
-ma_slope = data['MA50'].dropna().iloc[-1] - data['MA50'].dropna().iloc[-5] if len(data['MA50'].dropna()) >= 5 else 0
+# Sicheres Auslesen der letzten MA50-Werte für die Steigungsberechnung
+if not data.empty and 'MA50' in data.columns and len(data['MA50'].dropna()) >= 5:
+    ma_slope = data['MA50'].dropna().iloc[-1] - data['MA50'].dropna().iloc[-5]
+else:
+    ma_slope = 0
 
 # 5-stufige Ampellogik mit klarer Differenzierung
 if last_rsi is not None:
@@ -404,8 +662,12 @@ if buy_levels:
 for lvl in buy_levels:
     lvl_low = lvl * (1 - 0.015)
     lvl_high = lvl * (1 + 0.015)
+    # Vor der Verwendung von plot_df.index[-1] prüfen, ob plot_df leer ist
+    if plot_df.empty:
+        st.warning("Keine Daten im ausgewählten Zeitintervall verfügbar. Bitte Intervall oder Zeitraum ändern.")
+        st.stop()
     fig3.add_annotation(
-        x=plot_df.index[-1],  # Positioniert rechts
+        x=plot_df.index[-1],
         y=(lvl_low + lvl_high) / 2,
         text=f"Buy-Zone: {lvl_low:.0f} – {lvl_high:.0f}",
         showarrow=False,
@@ -434,6 +696,9 @@ if test_levels:
 for lvl in test_levels:
     lvl_low = lvl * (1 - 0.015)
     lvl_high = lvl * (1 + 0.015)
+    if plot_df.empty:
+        st.warning("Keine Daten im ausgewählten Zeitintervall verfügbar. Bitte Intervall oder Zeitraum ändern.")
+        st.stop()
     fig3.add_annotation(
         x=plot_df.index[-1],
         y=(lvl_low + lvl_high) / 2,
@@ -449,6 +714,9 @@ for lvl in test_levels:
 # Fibonacci-Level als horizontale Linien mit Annotation links oben, grau
 for lvl, val in fib.items():
     fig3.add_hline(y=val, line=dict(dash='dot', color='#cccccc'), opacity=0.5)
+    if plot_df.empty:
+        st.warning("Keine Daten im ausgewählten Zeitintervall verfügbar. Bitte Intervall oder Zeitraum ändern.")
+        st.stop()
     fig3.add_annotation(
         x=plot_df.index[-1],
         y=val,
@@ -528,6 +796,52 @@ with st.expander("🧠 Erklärung: Buy- und Test-Zonen"):
 
     """)
 
+# 📊 Zusätzliche Makro-Charts
+
+def plot_bpspx_chart():
+    st.subheader("SPXA200R (Prozent der S&P 500 Aktien über dem 200-Tage-MA) mit RSI")
+    try:
+        bpspx = yf.download("^SPXA200R", start="2023-01-01", interval="1d")
+        if bpspx.empty:
+            st.warning("Keine SPXA200R-Daten verfügbar.")
+            return
+
+        bpspx["RSI"] = RSIIndicator(close=bpspx["Close"]).rsi()
+
+        fig, ax1 = plt.subplots(figsize=(12, 5))
+        ax1.set_title("SPXA200R mit RSI", fontsize=16)
+        ax1.plot(bpspx.index, bpspx["Close"], label="SPXA200R", color="tab:blue")
+        ax1.set_ylabel("SPXA200R", color="tab:blue")
+        ax1.tick_params(axis="y", labelcolor="tab:blue")
+
+        ax2 = ax1.twinx()
+        ax2.plot(bpspx.index, bpspx["RSI"], label="RSI", color="tab:red", alpha=0.5)
+        ax2.set_ylabel("RSI", color="tab:red")
+        ax2.tick_params(axis="y", labelcolor="tab:red")
+
+        fig.tight_layout()
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.error(f"Fehler beim Laden der SPXA200R-Daten: {e}")
+
+# Expander für Makro-Charts mit neuen Checkboxen
+with st.expander("📊 Zusätzliche Makro-Charts"):
+    show_junk = st.checkbox("JUNK vs SPX anzeigen")
+    show_hyg = st.checkbox("HYG vs SPX anzeigen")
+    show_spx_ma = st.checkbox("SPX Monthly MAs anzeigen")
+    show_spxa200r = st.checkbox("SPXA200R anzeigen")
+
+# Ensure all charts can be shown independently
+if 'show_junk' in locals() and show_junk:
+    plot_jnk_spx_chart()
+if 'show_hyg' in locals() and show_hyg:
+    plot_hyg_chart()
+if 'show_spx_ma' in locals() and show_spx_ma:
+    plot_spx_monthly_ma_chart()
+if 'show_spxa200r' in locals() and show_spxa200r:
+    plot_bpspx_chart()
+
 
 # 📊 Sektorrotation
 st.header("📊 Sektorrotation")
@@ -561,3 +875,5 @@ ax2.set_xticklabels(sector_perf.index.map(lambda x: sector_etfs[x]), rotation=45
 ax2.grid(True, axis='y')
 ax2.legend()
 st.pyplot(fig2)
+
+
