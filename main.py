@@ -56,18 +56,6 @@ resolution_note = {
 }
 st.sidebar.markdown(f"**Ausgewähltes Intervall:** {resolution_note.get(interval, '')}")
 
-# Automatische Cluster-Toleranz je nach Intervall (neue Logik)
-selected_interval = interval
-if selected_interval == "1h":
-    cluster_threshold = 0.005  # 0.5%
-elif selected_interval == "1d":
-    cluster_threshold = 0.01  # 1%
-elif selected_interval == "1wk":
-    cluster_threshold = 0.015  # 1.5%
-elif selected_interval == "1mo":
-    cluster_threshold = 0.02  # 2%
-else:
-    cluster_threshold = 0.01  # Standardwert
 
 # Sidebar: Anzeigeoptionen für Indikatoren und Signale
 with st.sidebar.expander("🔍 Anzeigen"):
@@ -117,29 +105,20 @@ with st.sidebar.expander("📘 Tickerliste (Beispiele)"):
     - DIA → Dow Jones ETF  
     """)
 start_date = st.sidebar.date_input("📅 Startdatum", value=pd.to_datetime("2023-01-01"))
-end_date = st.sidebar.date_input("📅 Enddatum", value=pd.to_datetime("today"))
-rsi_buy_threshold = st.sidebar.slider(
-    "RSI Buy-Zone Schwelle", 10, 50, default_rsi_buy,
-    help="Buy-Signal: RSI unter Schwelle **und** Kurs unter MA200 + Toleranz (%)"
-)
-rsi_test_threshold = st.sidebar.slider(
-    "RSI Test-Zone Schwelle", 50, 90, default_rsi_test,
-    help="Test-Signal: RSI über Schwelle **und** Kurs über MA50 + 5 %"
-)
-ma_buy_distance = st.sidebar.slider(
-    "Buy-Zone Nähe zu MA200 (%)", 1, 10, default_ma_buy_distance,
-    help="Buy-Signal: Kurs liegt weniger als x % über dem MA200"
-)
-price_bins = st.sidebar.slider("📊 Volumenprofil-Bins", 10, 100, 50)
+# Set default end date to tomorrow (today + 1 day), but only as default; if the user selects another date, use that.
+default_end_date = pd.to_datetime("today") + pd.Timedelta(days=1)
+end_date = st.sidebar.date_input("📅 Enddatum", value=default_end_date)
+## Remove sliders for RSI/MA/Volume thresholds, use fixed defaults
+rsi_buy_threshold = 30
+rsi_test_threshold = 50
+ma_buy_distance = 3
+price_bins = 50
 
-# Y-Achse Zoom Slider
-y_range_pct = st.sidebar.slider("📐 Y-Achse Zoom (%)", 1, 50, 15, help="Definiert den sichtbaren Bereich um den Medianpreis ± x %")
 
-# Zonen-Prominenz Slider für automatische Zonenfindung
 zone_prominence = st.sidebar.slider("Prominenz für Zonenfindung", 10, 1000, 300, step=50)
 with st.sidebar.expander("ℹ️ Erklärung zur Zonenprominenz"):
     st.markdown("""
-    Die **Prominenz** bestimmt, wie **ausgeprägt** ein lokales Hoch oder Tief sein muss, um als Buy-/Test-Zone erkannt zu werden.
+    Die **Prominenz** bestimmt, wie **ausgeprägt** ein lokales Hoch oder Tief sein muss, um als Zone erkannt zu werden.
 
     - **Niedrige Prominenz** (z. B. 100): erkennt viele kleinere Zonen – ideal für **Intraday-Setups**
     - **Hohe Prominenz** (z. B. 600–1000): erkennt nur markante, längerfristige Zonen – geeignet für **Swing- oder Positionstrading**
@@ -147,20 +126,6 @@ with st.sidebar.expander("ℹ️ Erklärung zur Zonenprominenz"):
     **Technischer Hintergrund:** Eine Spitze zählt nur dann als relevant, wenn sie sich um mindestens die gewählte Prominenz **von benachbarten Kurswerten abhebt** (basierend auf `scipy.signal.find_peaks`).
     """)
 
-# Clustering-Schwelle Slider
-threshold_pct = st.sidebar.slider("📎 Clustering-Schwelle (%)", 0, 10, 3, step=1)
-with st.sidebar.expander("ℹ️ Erklärung zur Clustering-Schwelle"):
-    st.markdown("""
-    Die Clustering-Schwelle bestimmt, ob **nahe beieinanderliegende Kursniveaus** (z. B. zwei Tiefs bei 4100 und 4120 Punkten) **zu einer gemeinsamen Zone zusammengefasst** werden.
-
-    ---
-    **Empfohlene Einstellungen:**
-    - **Intraday-Setups (1h):** 1–2 % – genauere Zonen
-    - **Swingtrading (1d):** 2–4 % – robuste Zonen mit etwas Toleranz
-    - **Makro (1w):** 4–6 % – breite Zonen mit starker Signifikanz
-
-    Die Schwelle wirkt **nachträglich** auf automatisch erkannte Hoch- und Tiefpunkte.
-    """)
 
 
 # Statischer Chart
@@ -170,7 +135,13 @@ show_static = st.sidebar.checkbox("📷 Statischen Chart anzeigen", value=False)
 def load_data(ticker, start, end, interval):
     df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False)
     df.dropna(inplace=True)
-    df['MA50'] = df['Close'].rolling(window=50).mean()
+    # Debug-Ausgaben für df['Close']
+    print(df['Close'].head())
+    print(type(df['Close']))
+    if isinstance(df['Close'], pd.DataFrame):
+        df['MA50'] = df['Close'].iloc[:, 0].rolling(window=50).mean()
+    else:
+        df['MA50'] = df['Close'].rolling(window=50).mean()
     df['MA100'] = df['Close'].rolling(window=100).mean()
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['Close_Series'] = df['Close'].squeeze()
@@ -206,31 +177,11 @@ def identify_zone_ranges(series, prominence=0.5):
     high_levels = sorted(set(round(series[i], -1) for i in highs_idx))  # gerundet für Clustering
     return low_levels, high_levels
 
-# --- Zonen-Clustering Funktion (Cluster-Zonen zusammenfassen) ---
-def cluster_zones(levels, threshold_pct):
-    """Fasst nahe beieinanderliegende Zonen gemäß threshold_pct (in %) zusammen."""
-    if not levels:
-        return []
-    levels_sorted = sorted(levels)
-    clusters = []
-    current_cluster = [levels_sorted[0]]
-    for lvl in levels_sorted[1:]:
-        if abs(lvl - current_cluster[-1]) / current_cluster[-1] * 100 <= threshold_pct:
-            current_cluster.append(lvl)
-        else:
-            # Cluster-Mittelwert
-            clusters.append(round(np.mean(current_cluster), 2))
-            current_cluster = [lvl]
-    clusters.append(round(np.mean(current_cluster), 2))
-    return clusters
 
-# Zonenfindung mit einstellbarer Prominenz
 raw_buy_levels, raw_test_levels = identify_zone_ranges(close_series, prominence=zone_prominence)
-# Clustering der gefundenen Levels mit automatisch gewählter cluster_threshold
-buy_levels = cluster_zones(raw_buy_levels, cluster_threshold * 100)
-test_levels = cluster_zones(raw_test_levels, cluster_threshold * 100)
+buy_levels = raw_buy_levels
+test_levels = raw_test_levels
 
-# Buy-/Test-Zonen als DataFrames zur Visualisierung
 buy_zone_df = pd.DataFrame({'Level': buy_levels})
 test_zone_df = pd.DataFrame({'Level': test_levels})
 
@@ -257,6 +208,9 @@ max_volume = max(hist_vals)
 
 # Plot: Matplotlib-Chart
 fig, ax = plt.subplots(figsize=(14, 8))
+# Y-Achsen-Skalierung optimieren: Skalenabstand auf 100 Punkte
+from matplotlib.ticker import MultipleLocator
+ax.yaxis.set_major_locator(MultipleLocator(100))  # Skalenabstand auf 100 Punkte setzen
 ax.plot(close_series.index, close_series.values, label='Close', linewidth=2.5, color='#00bfff')
 ax.plot(data['MA50'], label='MA50', linestyle='--', color='#ffaa00')
 ax.plot(data['MA100'], label='MA100', linestyle='--', color='brown')
@@ -276,60 +230,72 @@ ax.scatter(buy_zone.index, close_series.loc[buy_zone.index], label='Buy Zone (Si
 ax.scatter(test_zone.index, close_series.loc[test_zone.index], label='Test Zone (Signal)', marker='x', color='red', s=80)
 
 
-# --- Confluent Zones (Mehrfach-Konfluenz-Zonen) ---
-def find_confluent_zones(df, prominence_threshold=300, volume_bins=50):
+## Remove all sliders for RSI, MA-Nähe, Y-Achsen-Zoom, Clustering-Schwelle und Volume-Bins
+# (No explicit code for these; ensure only zone_prominence and min_score slider remain)
+
+# Replace previous slider for minimal zone score threshold with new "Konfluenz-Schwelle"
+selected_min_score = st.sidebar.slider("Konfluenz-Schwelle", 1, 3, 2)
+
+# --- Neue Confluence Zone Logik ---
+def is_near_fibonacci_level(price, fibs=None, tolerance=0.01):
+    """True, wenn Preis nahe an einem Fibonacci-Level liegt."""
+    if fibs is None:
+        return False
+    for val in fibs.values():
+        if abs(float(price) - float(val)) / float(val) < tolerance:
+            return True
+    return False
+
+def is_near_ma(price, ma_values, tolerance=0.015):
+    """True, wenn Preis nahe an einem der angegebenen MA-Werte liegt."""
+    for ma in ma_values:
+        if pd.notna(ma) and abs(price - ma) / ma < tolerance:
+            return True
+    return False
+
+def find_confluence_zones(series, prominence=300, fibs=None, ma_series_dict=None):
+    """
+    Identifiziert Confluence Zones (ehemals Buy/Test-Zonen) mit 3-Punkte-Score.
+    Score: +1 lokale Preisreaktion (Prominenz), +1 Nähe Fibonacci, +1 Nähe MA.
+    """
+    # 1. Lokale Extrema (Preisreaktion)
+    lows_idx, _ = find_peaks(-series, prominence=prominence)
+    highs_idx, _ = find_peaks(series, prominence=prominence)
+    zone_idxs = sorted(set(list(lows_idx) + list(highs_idx)))
+    zone_levels = [series[i] for i in zone_idxs]
     zones = []
-    price = df['Close']
-    volume = df['Volume']
-    high = df['High']
-    low = df['Low']
-
-    # Rolling highs/lows (swing levels)
-    rolling_highs = price.rolling(window=10).max()
-    rolling_lows = price.rolling(window=10).min()
-
-    for i in range(10, len(df)):
-        score = 0
-        level = price.iloc[i]
-
-        # Criteria 1: price reacted before (support/resistance)
-        if i < len(rolling_highs) and i < len(rolling_lows):
-            if (abs(level - rolling_highs.iloc[i]) / level).item() < 0.005 or (abs(level - rolling_lows.iloc[i]) / level).item() < 0.005:
-                score += 1
-
-        # Criteria 2: high volume at this price level
-        volume_window = volume[i-5:i+5].mean()
-        if volume.iloc[i].item() > volume_window.mean() * 1.5:
-            score += 1
-
-        # Criteria 3: FVG detection (gap in 3-candle structure)
-        if i >= 2:
-            if (low.iloc[i - 2].item() > high.iloc[i].item()):
-                score += 1
-            try:
-                high_val = high.iloc[i - 2]
-                low_val = low.iloc[i]
-                try:
-                    if (
-                        pd.notna(high_val).item()
-                        and pd.notna(low_val).item()
-                        and high_val.item() < low_val.item()
-                    ):
-                        score += 1
-                except Exception:
-                    pass
-            except (IndexError, KeyError):
-                continue  # überspringt ungültige Indizes
-
-        # Criteria 4: price cluster via KDE peak (approximated)
-        bin_index = int((level - df['Low'].min()) / (df['High'].max() - df['Low'].min()) * volume_bins)
-        if bin_index >= 0 and bin_index < volume_bins:
-            score += 1
-
-        # Add zone if score >= 1
-        if score >= 1:
-            zones.append({'level': level, 'score': score})
-
+    for i, lvl in zip(zone_idxs, zone_levels):
+        zone_score = 0
+        # 1. Lokale Preisreaktion (immer gegeben, da durch Prominenz identifiziert)
+        zone_score += 1
+        # 2. Nähe Fibonacci-Level
+        fib_hit = is_near_fibonacci_level(lvl, fibs=fibs, tolerance=0.015)
+        if fib_hit:
+            zone_score += 1
+        # 3. Nähe zu gleitendem Durchschnitt (MA200 oder EMA50)
+        ma_hit = False
+        if ma_series_dict is not None:
+            for ma_name, ma_ser in ma_series_dict.items():
+                # Nächstliegender Index für diesen Level
+                nearest_idx = np.abs(series.values - lvl).argmin()
+                ma_val = ma_ser.iloc[nearest_idx] if nearest_idx < len(ma_ser) else np.nan
+                if pd.notna(ma_val) and abs(lvl - ma_val) / ma_val < 0.015:
+                    ma_hit = True
+                    break
+        if ma_hit:
+            zone_score += 1
+        # Compute low/high/mid for zone labeling
+        band = lvl * 0.015  # 1.5% band
+        zone_low = lvl - band
+        zone_high = lvl + band
+        zone_mid = lvl
+        zones.append({
+            'level': lvl,
+            'score': zone_score,
+            'low': zone_low,
+            'high': zone_high,
+            'mid': zone_mid
+        })
     return zones
 
 # Buy-/Test-Zonen als Flächen (je 1 Rechteck pro Zone mit 1.5% Bandbreite)
@@ -366,23 +332,74 @@ if test_levels:
     test_upper_auto = test_max * (1 + 0.015)
     ax.axhspan(test_lower_auto, test_upper_auto, color='#ff6600', alpha=0.1, label='Test-Zone automatisch')
 
-# --- Einzeichnen der neuen Confluent Zones ---
-confluent_zones = find_confluent_zones(data, prominence_threshold=zone_prominence, volume_bins=price_bins)
-for zone in confluent_zones:
-    color = 'gray'
-    if zone['score'] >= 4:
-        color = 'green'
-    elif zone['score'] >= 2:
-        color = 'orange'
-    ax.axhline(y=zone['level'].item() if isinstance(zone['level'], pd.Series) else zone['level'],
-               color=color, linestyle='--', linewidth=1, alpha=0.8)
+## --- Entferne Buy-/Test-Zonen-Flächen und zeichne nur noch Confluence Zones ---
+# Bestimme Confluence Zones mit Score
+ma_series_dict = {'MA200': data['MA200'], 'EMA50': data['EMA14']}  # EMA14 als EMA50-Ersatz, falls EMA50 nicht vorhanden
+confluence_zones = find_confluence_zones(
+    close_series, prominence=zone_prominence, fibs=fib, ma_series_dict=ma_series_dict
+)
+# Filtere nach Score
+confluence_zones = [z for z in confluence_zones if z['score'] >= selected_min_score]
+# Zeichne Confluence Zones als horizontale Linien mit neuem Label-Stil
+#
+# --- Neue Beschriftung der Confluence Zones weiter rechts, mit Preisbereich, automatischer Versatz ---
+used_y_positions = []
+min_vsep = 0.01  # minimaler vertikaler Abstand (relativ zum Preis)
 
-    # Legende für Confluent Zones ergänzen
+for i, zone in enumerate(confluence_zones):
+    color = {3: 'darkgreen', 2: 'orange', 1: 'gray'}.get(zone['score'], 'gray')
+    ax.axhline(y=zone['level'], color=color, linestyle='--', linewidth=2, alpha=0.8)
+    # Preisbereich (Mitte, Low, High)
+    zone_bottom = zone.get('low', zone['level'])
+    zone_top = zone.get('high', zone['level'])
+    price_level = (zone_top + zone_bottom) / 2
+    match_count = zone['score']
+    total_indicators = 3
+    # Calculate price_min and price_max for annotation
+    price_min = min(zone_top, zone_bottom)
+    price_max = max(zone_top, zone_bottom)
+    # X-Position: deutlich weiter rechts, um Überlappung mit Candles zu vermeiden
+    x_pos = data.index[-1] + pd.Timedelta(days=30)
+    # Automatischer Versatz bei Überlappung
+    y_pos = price_level
+    for prev_y in used_y_positions:
+        if abs(prev_y - y_pos) / max(1, y_pos) < min_vsep:
+            y_pos += (zone_top - zone_bottom) * 0.3 if (i % 2 == 0) else -(zone_top - zone_bottom) * 0.3
+    used_y_positions.append(y_pos)
+    # Updated label: show score and price range (rounded, upper–lower)
+    label = f"Confluence Zone: {match_count}/{total_indicators}\n{zone['low']:.0f}–{zone['high']:.0f}"
+    ax.annotate(
+        label,
+        xy=(x_pos, y_pos),
+        xytext=(x_pos, y_pos + (zone_top-zone_bottom)*0.1),
+        ha="left",
+        va='center',
+        bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'),
+        fontsize=8,
+        arrowprops=None
+    )
+    # --- Kursziel unterhalb der aktuellen Zone anzeigen ---
+    # Berechnung des ATR (14 Perioden)
+    atr = data['High'].rolling(window=14).max() - data['Low'].rolling(window=14).min()
+    import pandas as pd  # ensure pd is available in this scope
+    atr_value = atr.iloc[-1] if isinstance(atr, pd.Series) else atr
+    # Kursziel: Unterkante der Zone - ATR * 1.5
+    kursziel = zone_bottom - (atr_value * 1.5)
+    # Kursziel anzeigen (z. B. als Text rechts im Chart)
+    ax.text(
+        data.index[-1] + pd.Timedelta(days=20),  # Position rechts neben letztem Kerzenstand
+        kursziel,
+        f"Zielbereich: {kursziel:.0f}" if isinstance(kursziel, (int, float)) else f"Zielbereich: {float(kursziel.iloc[-1]):.0f}",
+        verticalalignment='center',
+        bbox=dict(facecolor='gray', edgecolor='black', boxstyle='round,pad=0.4'),
+        fontsize=8,
+        color='white'
+    )
 from matplotlib.lines import Line2D
 custom_lines = [
-    Line2D([0], [0], color='green', lw=2, linestyle='--', label='High Confluence'),
-    Line2D([0], [0], color='orange', lw=2, linestyle='--', label='Medium Confluence'),
-    Line2D([0], [0], color='gray', lw=2, linestyle='--', label='Low Confluence'),
+    Line2D([0], [0], color='darkgreen', lw=2, linestyle='--', label='Confluence Zone (3/3)'),
+    Line2D([0], [0], color='orange', lw=2, linestyle='--', label='Confluence Zone (2/3)'),
+    Line2D([0], [0], color='gray', lw=2, linestyle='--', label='Confluence Zone (1/3)'),
 ]
 
 # Fibonacci farbig in grau (#cccccc), Label oben links, kleinere Schrift
@@ -398,6 +415,11 @@ for count, edge in zip(hist_vals, bin_edges[:-1]):
 # Layout
 if show_static:
     st.subheader("📊 Statischer Chart (für Export oder Snapshot)")
+    # Y-Achsen-Grenzen anhand der Confluence-Zonen setzen
+    if confluence_zones:
+        min_zone_price = min([zone['low'] for zone in confluence_zones])
+        max_zone_price = max([zone['high'] for zone in confluence_zones])
+        ax.set_ylim(min_zone_price - 100, max_zone_price + 100)
     st.pyplot(fig)
     ax.set_xlim([data.index.min(), data.index.max()])
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
@@ -582,11 +604,6 @@ test_signals = plot_df['Test Signal'].dropna()
 
 fig3 = go.Figure()
 fig3.update_layout(height=1200)
-# Y-Achse Bereich um Medianpreis ± x %
-mid_price = plot_df['Close'].median()
-spread = mid_price * (y_range_pct / 100)
-y_min = mid_price - spread
-y_max = mid_price + spread
 
 # Bedingte Anzeige der Indikatoren
 if show_indicators:
@@ -645,70 +662,29 @@ fig3.add_trace(go.Candlestick(
     decreasing_line_color='red',
     name='Candlestick'
 ))
-# Buy-Zonen als Rechtecke (±1.5% Bandbreite)
-if buy_levels:
-    buy_min = min(buy_levels)
-    buy_max = max(buy_levels)
-    for lvl in buy_levels:
-        fig3.add_shape(type='rect',
-                       xref='x', yref='y',
-                       x0=plot_df.index.min(), x1=plot_df.index.max(),
-                       y0=lvl * (1 - 0.015), y1=lvl * (1 + 0.015),
-                       fillcolor='rgba(0, 128, 0, 0.15)',
-                       line=dict(color='green', width=1),
-                       layer='below')
-
-# Buy-Zonen Textbeschriftung
-for lvl in buy_levels:
-    lvl_low = lvl * (1 - 0.015)
-    lvl_high = lvl * (1 + 0.015)
-    # Vor der Verwendung von plot_df.index[-1] prüfen, ob plot_df leer ist
-    if plot_df.empty:
-        st.warning("Keine Daten im ausgewählten Zeitintervall verfügbar. Bitte Intervall oder Zeitraum ändern.")
-        st.stop()
-    fig3.add_annotation(
-        x=plot_df.index[-1],
-        y=(lvl_low + lvl_high) / 2,
-        text=f"Buy-Zone: {lvl_low:.0f} – {lvl_high:.0f}",
-        showarrow=False,
-        font=dict(size=12, color='green'),
-        bgcolor='rgba(0, 128, 0, 0.2)',
-        bordercolor='green',
-        borderwidth=1,
-        yshift=10
+# --- Confluence Zones im Plotly-Chart ---
+for zone in confluence_zones:
+    color = {3: 'darkgreen', 2: 'orange', 1: 'gray'}.get(zone['score'], 'gray')
+    fig3.add_hline(
+        y=zone['level'],
+        line=dict(dash='dash', color=color, width=2),
+        opacity=0.9
     )
-
-
-# Test-Zonen als Rechtecke (±1.5% Bandbreite)
-if test_levels:
-    test_min = min(test_levels)
-    test_max = max(test_levels)
-    for lvl in test_levels:
-        fig3.add_shape(type='rect',
-                       xref='x', yref='y',
-                       x0=plot_df.index.min(), x1=plot_df.index.max(),
-                       y0=lvl * (1 - 0.015), y1=lvl * (1 + 0.015),
-                       fillcolor='rgba(255, 102, 0, 0.15)',
-                       line=dict(color='orange', width=1),
-                       layer='below')
-
-# Test-Zonen Textbeschriftung
-for lvl in test_levels:
-    lvl_low = lvl * (1 - 0.015)
-    lvl_high = lvl * (1 + 0.015)
-    if plot_df.empty:
-        st.warning("Keine Daten im ausgewählten Zeitintervall verfügbar. Bitte Intervall oder Zeitraum ändern.")
-        st.stop()
+    # Compose annotation text with score and price range
+    label = f"Confluence Zone: {zone['score']}/3\n{zone['low']:.0f}–{zone['high']:.0f}"
+    # Place annotation clearly outside the right of candles
+    x_pos = plot_df.index[-1] + pd.Timedelta(days=30)
     fig3.add_annotation(
-        x=plot_df.index[-1],
-        y=(lvl_low + lvl_high) / 2,
-        text=f"Test-Zone: {lvl_low:.0f} – {lvl_high:.0f}",
+        x=x_pos,
+        y=zone['level'],
+        text=label,
         showarrow=False,
-        font=dict(size=12, color='orange'),
-        bgcolor='rgba(255, 140, 0, 0.2)',
-        bordercolor='orange',
+        font=dict(size=13, color=color),
+        bgcolor='rgba(255,255,255,0.7)',
+        bordercolor=color,
         borderwidth=1,
-        yshift=-10
+        yshift=0,
+        xanchor='left'
     )
 
 # Fibonacci-Level als horizontale Linien mit Annotation links oben, grau
@@ -754,46 +730,32 @@ with st.expander("Legende"):
     - **Rot**: Bearish (Schlusskurs < Eröffnung)
 
 **Zonen**
-- **Buy-Zonen**: grünliche Fläche ('rgba(50,200,100,0.2)') – Bereich mit erhöhtem Kaufinteresse
-- **Test-Zonen**: orange-braune Fläche ('rgba(200,100,50,0.2)') – Bereich mit Widerstand/Test
+- **Confluence Zones**:  
+    - **Dunkelgrün**: Score 3/3  
+    - **Orange**: Score 2/3  
+    - **Grau**: Score 1/3  
+  → Je höher der Score, desto mehr Faktoren treffen an dieser Zone zusammen (Preisreaktion, Fibonacci, MA).
 
 **Signale**
 - **Grüne Punkte**: Buy-Signal (Kombination aus RSI/MA)
 - **Rote Punkte**: Test-Signal (Kombination aus RSI/MA)
     """)
 
-with st.expander("🧠 Erklärung: Buy- und Test-Zonen"):
+with st.expander("🧠 Erklärung: Confluence Zones"):
     st.markdown("""
-    Die **Buy- und Test-Zonen** dienen der Identifikation von markanten Preisbereichen, an denen der Markt typischerweise reagiert. Diese Zonen können sowohl für Einstiege als auch für Risikomanagement genutzt werden.
+    Die **Confluence Zones** markieren Preisbereiche, an denen mehrere wichtige Faktoren zusammentreffen. Je höher der Score (maximal 3), desto mehr Argumente sprechen für die Relevanz dieser Zone.
 
-    ---
-    ### ✅ **Buy-Zonen**
-    - **Definition:** Bereich mit erhöhtem Kaufinteresse. Typischerweise frühere Tiefs, an denen es zu Umkehrformationen kam.
-    - **Bedingungen:** 
-      - RSI unter eingestellter Schwelle (z. B. unter 40)
-      - Kurs liegt nahe unter dem gleitenden Durchschnitt MA200
-    - **Signal:** Grüner Punkt im Chart
-    - **Beispiel:** 
-        - RSI = 35, Kurs bei 4.200 Punkte (MA200 = 4.250) → Buy-Signal wird aktiviert
+    **Bewertungskriterien (je 1 Punkt):**
+    1. Lokale Preisreaktion (markantes Hoch oder Tief, Prominenz)
+    2. Nähe zu einem Fibonacci-Level
+    3. Nähe zu einem gleitenden Durchschnitt (MA200 oder EMA50)
 
-    ---
-    ### 🧪 **Test-Zonen**
-    - **Definition:** Preisbereiche, die als Widerstand fungieren oder „abgeklopft“ werden, bevor der Markt entscheidet.
-    - **Bedingungen:** 
-      - RSI über eingestellter Schwelle (z. B. über 65)
-      - Kurs über MA50 + 5 %
-    - **Signal:** Roter Punkt im Chart
-    - **Beispiel:** 
-        - RSI = 72, Kurs bei 4.600 Punkte (MA50 = 4.300) → Test-Zone aktiviert
+    **Interpretation:**
+    - **Score 3/3:** Sehr starke Konfluenz – mehrere wichtige Faktoren treffen zusammen.
+    - **Score 2/3:** Mittlere Konfluenz – mindestens zwei Faktoren stimmen überein.
+    - **Score 1/3:** Leichte Konfluenz – nur ein Faktor spricht für diese Zone.
 
-    ---
-    ### 🧠 **Hintergrund zur automatischen Erkennung**
-    Zusätzlich zu den signalbasierten Zonen identifiziert der Algorithmus **automatisch relevante Kurscluster**, z. B. lokale Hochs oder Tiefs, die mehrfach angelaufen wurden. Diese Zonen basieren auf der sog. **Prominenz** des Kursverlaufs (analog zu `find_peaks`).
-
-    Dadurch entstehen:
-    - **Buy-Zonen (grüne Flächen):** Mehrfache Unterstützungen
-    - **Test-Zonen (orange Flächen):** Widerstandszonen oder Pivot-Level
-
+    Nur Zonen mit Score ≥ der gewählten Konfluenz-Schwelle werden angezeigt.
     """)
 
 # 📊 Zusätzliche Makro-Charts
@@ -877,3 +839,10 @@ ax2.legend()
 st.pyplot(fig2)
 
 
+
+# Sidebar: Erklärung Confluence Zone
+with st.sidebar.expander("ℹ️ Erklärung: Confluence Zone"):
+    st.markdown("""
+    Eine **Confluence Zone** entsteht, wenn mehrere technische Indikatoren (z. B. Fibonacci, gleitende Durchschnitte, Volumencluster) im selben Preisbereich zusammenfallen. 
+    Diese Zonen gelten als besonders relevant für mögliche Umkehrpunkte oder Breakouts.
+    """)
